@@ -31,7 +31,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-def send_message(chat_id: int, text: str, parse_mode: str = "Markdown"):
+def send_message(chat_id: int, text: str, parse_mode: str = "HTML"):
     r = requests.post(
         f"{TELEGRAM_API}/sendMessage",
         data={"chat_id": chat_id, "text": text, "parse_mode": parse_mode},
@@ -108,3 +108,4 @@ async def create_ticket(
     # Sin captura => solo texto
     res = send_message(TICKETS_GROUP_ID, ticket_text)
     return {"ok": True, "sent": "message", "telegram": res}
+
