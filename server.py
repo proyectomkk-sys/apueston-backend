@@ -7,7 +7,11 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from html import escape
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
+BOT_TOKEN = {
+    "HS Call Center": os.environ.get("BOT_TOKEN_BOTA", ""),
+    "Soporte Bet Cajeros 24/7": os.environ.get("BOT_TOKEN_BOTB", ""),
+}
+
 TICKETS_GROUP_ID = int(os.environ.get("TICKETS_GROUP_ID", "-1003575621343"))
 
 if not BOT_TOKEN:
@@ -43,6 +47,16 @@ def send_photo(chat_id: int, caption: str, photo_bytes: bytes, filename: str = "
         raise HTTPException(status_code=500, detail=r.text)
     return r.json()
 
+def send_message_with_token(bot_token: str, chat_id: int, text: str, parse_mode="HTML"):
+    api = f"https://api.telegram.org/bot{bot_token}"
+    r = requests.post(
+        f"{api}/sendMessage",
+        data={"chat_id": chat_id, "text": text, "parse_mode": parse_mode},
+        timeout=30
+    )
+    return r
+
+
 @app.get("/")
 def root():
     return {"ok": True, "service": "apueston-backend"}
@@ -52,7 +66,7 @@ async def create_ticket(
     payload: str = Form(...),
     screenshot: UploadFile | None = File(None)
 ):
-    # 1) parsear JSON del campo payload
+    # 1) parsear JSON
     try:
         data = json.loads(payload)
     except Exception:
@@ -61,9 +75,10 @@ async def create_ticket(
     if data.get("type") != "reporte_falla":
         raise HTTPException(status_code=400, detail="type inválido")
 
-    # 2) leer bot origen (si llega)
+    # 2) leer bot origen (AQUÍ se define source_bot)
     source_bot = (data.get("source_bot") or "").strip() or "desconocido"
 
+    # 3) leer usuario
     user = data.get("user") or {}
     desc = (data.get("description") or "").strip()
     ts = int(data.get("ts") or int(time.time() * 1000))
@@ -72,6 +87,23 @@ async def create_ticket(
     if not user_id:
         raise HTTPException(status_code=400, detail="user_id faltante")
 
+    # 4) responder al usuario con el bot origen (si hay token)
+    bot_key = source_bot.lower()
+    bot_token = BOT_TOKEN.get(bot_key)
+
+    if bot_token:
+        try:
+            r = send_message_with_token(
+                bot_token,
+                int(user_id),
+                "✅ Recibimos tu reporte. Gracias por avisarnos."
+            )
+            if not r.ok:
+                print(f"No se pudo responder al usuario ({bot_key}): {r.text}")
+        except Exception as e:
+            print(f"Error respondiendo con bot {bot_key}: {e}")
+
+    # 5) continuar normal (mensaje al grupo)
     first = user.get("first_name", "")
     last = user.get("last_name", "")
     full_name = " ".join([first, last]).strip() or "Sin nombre"
@@ -79,6 +111,7 @@ async def create_ticket(
 
     if len(desc) < 5:
         raise HTTPException(status_code=400, detail="Descripción muy corta")
+
 
     # 3) escapar para HTML (evita que se rompa el parse_mode)
     full_name_e = escape(full_name)
@@ -112,3 +145,4 @@ async def create_ticket(
 
     res = send_message(TICKETS_GROUP_ID, ticket_text, parse_mode="HTML")
     return {"ok": True, "sent": "message", "telegram": res}
+
