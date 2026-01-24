@@ -13,7 +13,7 @@ GROUP_BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
 # 2) Tokens por bot ORIGEN (para responder al usuario)
 BOT_TOKENS = {
     "HS Call Center": os.environ.get("BOT_TOKENA", "").strip(),  # nuevo bot
-    "Soporte Bet Cajeros 24/7": os.environ.get("BOT_TOKENB", "").strip(),  # bot antiguo
+    #"Soporte Bet Cajeros 24/7": os.environ.get("BOT_TOKENB", "").strip(),  # bot antiguo
 }
 
 TICKETS_GROUP_ID = int(os.environ.get("TICKETS_GROUP_ID", "-1003575621343"))
@@ -124,3 +124,4 @@ async def create_ticket(
         raise HTTPException(status_code=500, detail=r.text)
 
     return {"ok": True, "sent": "message"}
+
