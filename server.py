@@ -7,17 +7,21 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from html import escape
 
-BOT_TOKEN = {
-    "HS Call Center": os.environ.get("BOT_TOKEN_BOTA", ""),
-    "Soporte Bet Cajeros 24/7": os.environ.get("BOT_TOKEN_BOTB", ""),
+# 1) Token PRINCIPAL (para publicar tickets al grupo)
+GROUP_BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
+
+# 2) Tokens por bot ORIGEN (para responder al usuario)
+BOT_TOKENS = {
+    "HS Call Center": os.environ.get("BOT_TOKENA", "").strip(),  # nuevo bot
+    "Soporte Bet Cajeros 24/7": os.environ.get("BOT_TOKENB", "").strip(),  # bot antiguo
 }
 
 TICKETS_GROUP_ID = int(os.environ.get("TICKETS_GROUP_ID", "-1003575621343"))
 
-if not BOT_TOKEN:
-    raise RuntimeError("Falta BOT_TOKEN en variables de entorno")
+if not GROUP_BOT_TOKEN:
+    raise RuntimeError("Falta BOT_TOKEN (token principal) en variables de entorno")
 
-TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
+TELEGRAM_API_GROUP = f"https://api.telegram.org/bot{GROUP_BOT_TOKEN}"
 
 app = FastAPI()
 
@@ -29,33 +33,19 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-def send_message(chat_id: int, text: str, parse_mode: str = "HTML"):
+def tg_send_message(api_base: str, chat_id: int, text: str, parse_mode: str = "HTML"):
     r = requests.post(
-        f"{TELEGRAM_API}/sendMessage",
-        data={"chat_id": chat_id, "text": text, "parse_mode": parse_mode},
-        timeout=30
-    )
-    if not r.ok:
-        raise HTTPException(status_code=500, detail=r.text)
-    return r.json()
-
-def send_photo(chat_id: int, caption: str, photo_bytes: bytes, filename: str = "screenshot.jpg", parse_mode: str = "HTML"):
-    files = {"photo": (filename, photo_bytes)}
-    data = {"chat_id": chat_id, "caption": caption, "parse_mode": parse_mode}
-    r = requests.post(f"{TELEGRAM_API}/sendPhoto", data=data, files=files, timeout=60)
-    if not r.ok:
-        raise HTTPException(status_code=500, detail=r.text)
-    return r.json()
-
-def send_message_with_token(bot_token: str, chat_id: int, text: str, parse_mode="HTML"):
-    api = f"https://api.telegram.org/bot{bot_token}"
-    r = requests.post(
-        f"{api}/sendMessage",
+        f"{api_base}/sendMessage",
         data={"chat_id": chat_id, "text": text, "parse_mode": parse_mode},
         timeout=30
     )
     return r
 
+def tg_send_photo(api_base: str, chat_id: int, caption: str, photo_bytes: bytes, filename: str, parse_mode: str = "HTML"):
+    files = {"photo": (filename, photo_bytes)}
+    data = {"chat_id": chat_id, "caption": caption, "parse_mode": parse_mode}
+    r = requests.post(f"{api_base}/sendPhoto", data=data, files=files, timeout=60)
+    return r
 
 @app.get("/")
 def root():
@@ -66,7 +56,7 @@ async def create_ticket(
     payload: str = Form(...),
     screenshot: UploadFile | None = File(None)
 ):
-    # 1) parsear JSON
+    # Parsear JSON
     try:
         data = json.loads(payload)
     except Exception:
@@ -75,10 +65,9 @@ async def create_ticket(
     if data.get("type") != "reporte_falla":
         raise HTTPException(status_code=400, detail="type inválido")
 
-    # 2) leer bot origen (AQUÍ se define source_bot)
-    source_bot = (data.get("source_bot") or "").strip() or "desconocido"
+    # Bot origen: esperamos "a" o "b"
+    source_bot = (data.get("source_bot") or "").strip().lower() or "desconocido"
 
-    # 3) leer usuario
     user = data.get("user") or {}
     desc = (data.get("description") or "").strip()
     ts = int(data.get("ts") or int(time.time() * 1000))
@@ -87,33 +76,27 @@ async def create_ticket(
     if not user_id:
         raise HTTPException(status_code=400, detail="user_id faltante")
 
-    # 4) responder al usuario con el bot origen (si hay token)
-    bot_key = source_bot.lower()
-    bot_token = BOT_TOKEN.get(bot_key)
-
-    if bot_token:
-        try:
-            r = send_message_with_token(
-                bot_token,
-                int(user_id),
-                "✅ Recibimos tu reporte. Gracias por avisarnos."
-            )
-            if not r.ok:
-                print(f"No se pudo responder al usuario ({bot_key}): {r.text}")
-        except Exception as e:
-            print(f"Error respondiendo con bot {bot_key}: {e}")
-
-    # 5) continuar normal (mensaje al grupo)
-    first = user.get("first_name", "")
-    last = user.get("last_name", "")
-    full_name = " ".join([first, last]).strip() or "Sin nombre"
-    username = user.get("username") or "sin_username"
-
     if len(desc) < 5:
         raise HTTPException(status_code=400, detail="Descripción muy corta")
 
+    # 1) Responder al usuario usando EL BOT ORIGEN (si hay token)
+    origin_token = BOT_TOKENS.get(source_bot, "")
+    if origin_token:
+        api_origin = f"https://api.telegram.org/bot{origin_token}"
+        r = tg_send_message(api_origin, int(user_id), "✅ Recibimos tu reporte. Gracias por avisarnos.", "HTML")
+        if not r.ok:
+            # 403 -> usuario no inició chat / bloqueó el bot
+            print(f"[WARN] No se pudo responder al usuario con bot '{source_bot}': {r.text}")
+    else:
+        print(f"[WARN] No hay token configurado para source_bot='{source_bot}'")
 
-    # 3) escapar para HTML (evita que se rompa el parse_mode)
+    # 2) Armar mensaje al grupo
+    first = user.get("first_name", "")
+    last = user.get("last_name", "")
+    full_name = (" ".join([first, last]).strip() or "Sin nombre")
+    username = (user.get("username") or "sin_username")
+
+    # Escapar para HTML
     full_name_e = escape(full_name)
     username_e = escape(username)
     desc_e = escape(desc)
@@ -127,22 +110,17 @@ async def create_ticket(
         f"📝 <b>Descripción:</b>\n{desc_e}"
     )
 
-    # 4) enviar (foto si hay screenshot)
+    # 3) Enviar al grupo con el BOT PRINCIPAL
     if screenshot and screenshot.filename:
         photo_bytes = await screenshot.read()
-        if not photo_bytes:
-            res = send_message(TICKETS_GROUP_ID, ticket_text, parse_mode="HTML")
-            return {"ok": True, "sent": "message", "telegram": res}
+        if photo_bytes:
+            r = tg_send_photo(TELEGRAM_API_GROUP, TICKETS_GROUP_ID, ticket_text, photo_bytes, screenshot.filename, "HTML")
+            if not r.ok:
+                raise HTTPException(status_code=500, detail=r.text)
+            return {"ok": True, "sent": "photo"}
 
-        res = send_photo(
-            TICKETS_GROUP_ID,
-            ticket_text,
-            photo_bytes,
-            filename=screenshot.filename,
-            parse_mode="HTML"
-        )
-        return {"ok": True, "sent": "photo", "telegram": res}
+    r = tg_send_message(TELEGRAM_API_GROUP, TICKETS_GROUP_ID, ticket_text, "HTML")
+    if not r.ok:
+        raise HTTPException(status_code=500, detail=r.text)
 
-    res = send_message(TICKETS_GROUP_ID, ticket_text, parse_mode="HTML")
-    return {"ok": True, "sent": "message", "telegram": res}
-
+    return {"ok": True, "sent": "message"}
