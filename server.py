@@ -1,15 +1,11 @@
 # server.py
-# FastAPI backend para recibir reportes desde la MiniApp y publicarlos en un grupo de Telegram.
-# Endpoint: POST /ticket (multipart/form-data)
-#   - payload: JSON string
-#   - screenshot: archivo opcional
-
 import os
 import time
 import json
 import requests
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from html import escape
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 TICKETS_GROUP_ID = int(os.environ.get("TICKETS_GROUP_ID", "-1003575621343"))
@@ -21,8 +17,6 @@ TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 app = FastAPI()
 
-# ✅ Para que GitHub Pages pueda llamar al backend
-# (Luego lo restringimos a tu dominio exacto)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -41,7 +35,7 @@ def send_message(chat_id: int, text: str, parse_mode: str = "HTML"):
         raise HTTPException(status_code=500, detail=r.text)
     return r.json()
 
-def send_photo(chat_id: int, caption: str, photo_bytes: bytes, filename: str = "screenshot.jpg", parse_mode: str = "Markdown"):
+def send_photo(chat_id: int, caption: str, photo_bytes: bytes, filename: str = "screenshot.jpg", parse_mode: str = "HTML"):
     files = {"photo": (filename, photo_bytes)}
     data = {"chat_id": chat_id, "caption": caption, "parse_mode": parse_mode}
     r = requests.post(f"{TELEGRAM_API}/sendPhoto", data=data, files=files, timeout=60)
@@ -58,6 +52,7 @@ async def create_ticket(
     payload: str = Form(...),
     screenshot: UploadFile | None = File(None)
 ):
+    # 1) parsear JSON del campo payload
     try:
         data = json.loads(payload)
     except Exception:
@@ -65,6 +60,9 @@ async def create_ticket(
 
     if data.get("type") != "reporte_falla":
         raise HTTPException(status_code=400, detail="type inválido")
+
+    # 2) leer bot origen (si llega)
+    source_bot = (data.get("source_bot") or "").strip() or "desconocido"
 
     user = data.get("user") or {}
     desc = (data.get("description") or "").strip()
@@ -82,30 +80,35 @@ async def create_ticket(
     if len(desc) < 5:
         raise HTTPException(status_code=400, detail="Descripción muy corta")
 
+    # 3) escapar para HTML (evita que se rompa el parse_mode)
+    full_name_e = escape(full_name)
+    username_e = escape(username)
+    desc_e = escape(desc)
+    source_bot_e = escape(source_bot)
+
     ticket_text = (
-        "🎫 **TICKET NUEVO**\n"
-        f"👤 **Usuario:** {full_name} | @{username} | id:{user_id}\n"
-        f"🕒 **Timestamp:** `{ts}`\n\n"
-        f"📝 **Descripción:**\n{desc}"
+        "🎫 <b>TICKET NUEVO</b>\n"
+        f"🤖 <b>Bot origen:</b> {source_bot_e}\n"
+        f"👤 <b>Usuario:</b> {full_name_e} | @{username_e} | id:{user_id}\n"
+        f"🕒 <b>Timestamp:</b> <code>{ts}</code>\n\n"
+        f"📝 <b>Descripción:</b>\n{desc_e}"
     )
 
-    # Si hay captura => enviar como foto con caption
+    # 4) enviar (foto si hay screenshot)
     if screenshot and screenshot.filename:
         photo_bytes = await screenshot.read()
         if not photo_bytes:
-            # si vino vacío, enviamos solo texto
-            res = send_message(TICKETS_GROUP_ID, ticket_text)
+            res = send_message(TICKETS_GROUP_ID, ticket_text, parse_mode="HTML")
             return {"ok": True, "sent": "message", "telegram": res}
 
         res = send_photo(
             TICKETS_GROUP_ID,
             ticket_text,
             photo_bytes,
-            filename=screenshot.filename
+            filename=screenshot.filename,
+            parse_mode="HTML"
         )
         return {"ok": True, "sent": "photo", "telegram": res}
 
-    # Sin captura => solo texto
-    res = send_message(TICKETS_GROUP_ID, ticket_text)
+    res = send_message(TICKETS_GROUP_ID, ticket_text, parse_mode="HTML")
     return {"ok": True, "sent": "message", "telegram": res}
-
