@@ -66,6 +66,7 @@ BOT_TOKENS = load_bot_tokens()
 # SQLITE
 # ----------------------------
 def db_connect():
+    os.makedirs(os.path.dirname(DB_PATH) or ".", exist_ok=True)
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     return conn
@@ -350,3 +351,4 @@ def start_listener_threads_once():
 def on_startup():
     if ENABLE_LISTENER:
         start_listener_threads_once()
+
