@@ -13,12 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from telegram import Update
 from telegram.constants import ChatType
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    ContextTypes,
-    filters,
-)
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, filters
 
 # ----------------------------
 # ENV
@@ -27,7 +22,10 @@ TICKETS_GROUP_ID = int(os.environ.get("TICKETS_GROUP_ID", "-1003575621343"))
 DB_PATH = os.environ.get("DB_PATH", "tickets.db")
 ENABLE_LISTENER = os.environ.get("ENABLE_LISTENER", "1") == "1"
 
-# Map: bot_name -> token
+
+# ----------------------------
+# BOT TOKENS
+# ----------------------------
 def load_bot_tokens() -> Dict[str, str]:
     raw = os.environ.get("BOT_TOKENS_JSON", "").strip()
     if raw:
@@ -35,32 +33,25 @@ def load_bot_tokens() -> Dict[str, str]:
             data = json.loads(raw)
             if not isinstance(data, dict):
                 raise ValueError("BOT_TOKENS_JSON debe ser un objeto JSON {nombre: token}")
-            # limpieza
+
             out = {}
             for k, v in data.items():
                 k = str(k).strip()
                 v = str(v).strip()
                 if k and v:
                     out[k] = v
+
             if not out:
                 raise ValueError("BOT_TOKENS_JSON está vacío")
             return out
         except Exception as e:
             raise RuntimeError(f"BOT_TOKENS_JSON inválido: {e}")
 
-    # Fallback por si aún usas 2 bots como antes
-    a = os.environ.get("BOT_TOKEN_BOTA", "").strip()
-    b = os.environ.get("BOT_TOKEN_BOTB", "").strip()
-    if a and b:
-        return {
-            "HS Call Center": a,
-            "Soporte Bet Cajeros 24/7": b,
-        }
-
-    raise RuntimeError("Faltan BOT_TOKENS_JSON o BOT_TOKEN_BOTA/BOT_TOKEN_BOTB")
+    raise RuntimeError("Falta BOT_TOKENS_JSON")
 
 
 BOT_TOKENS = load_bot_tokens()
+
 
 # ----------------------------
 # SQLITE
@@ -71,69 +62,83 @@ def db_connect():
     conn.row_factory = sqlite3.Row
     return conn
 
+
 def db_init():
     conn = db_connect()
     cur = conn.cursor()
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS tickets (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        created_at TEXT NOT NULL,
-        bot_name TEXT NOT NULL,
-        reporter_chat_id INTEGER,
-        reporter_name TEXT,
-        usuario TEXT,
-        sucursal TEXT,
-        categoria TEXT,
-        prioridad TEXT,
-        descripcion TEXT,
-        telefono TEXT,
-        equipo TEXT,
-        group_message_id INTEGER,
-        payload_json TEXT NOT NULL
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS tickets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL,
+            bot_name TEXT NOT NULL,
+            chat_id INTEGER,
+            client_user_name TEXT,
+            description TEXT,
+            cause TEXT,
+            solution TEXT,
+            group_message_id INTEGER,
+            payload_json TEXT NOT NULL
+        )
+        """
     )
-    """)
     conn.commit()
     conn.close()
+
 
 def db_insert_ticket(payload: dict, group_message_id: Optional[int]) -> int:
     conn = db_connect()
     cur = conn.cursor()
 
     created_at = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+
     bot_name = str(payload.get("bot_name", "")).strip()
+    client_user_name = str(payload.get("client_user_name", "")).strip()
 
-    reporter_chat_id = payload.get("reporter_chat_id", None)
+    chat_id = payload.get("chat_id", None)
     try:
-        reporter_chat_id = int(reporter_chat_id) if reporter_chat_id is not None else None
+        chat_id = int(chat_id) if chat_id is not None else None
     except:
-        reporter_chat_id = None
+        chat_id = None
 
-    reporter_name = str(payload.get("reporter_name", "") or "").strip()
+    description = str(payload.get("description", "")).strip()
+    cause = str(payload.get("cause", "")).strip()
+    solution = str(payload.get("solution", "")).strip()
 
-    usuario = str(payload.get("usuario", "") or "").strip()
-    sucursal = str(payload.get("sucursal", "") or "").strip()
-    categoria = str(payload.get("categoria", "") or "").strip()
-    prioridad = str(payload.get("prioridad", "") or "").strip()
-    descripcion = str(payload.get("descripcion", "") or "").strip()
-    telefono = str(payload.get("telefono", "") or "").strip()
-    equipo = str(payload.get("equipo", "") or "").strip()
+    clean_payload = {
+        "bot_name": bot_name,
+        "client_user_name": client_user_name,
+        "chat_id": chat_id,
+        "description": description,
+        "cause": cause,
+        "solution": solution,
+    }
 
-    cur.execute("""
+    cur.execute(
+        """
         INSERT INTO tickets (
-            created_at, bot_name, reporter_chat_id, reporter_name,
-            usuario, sucursal, categoria, prioridad, descripcion, telefono, equipo,
+            created_at, bot_name, chat_id, client_user_name, description, cause, solution,
             group_message_id, payload_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (
-        created_at, bot_name, reporter_chat_id, reporter_name,
-        usuario, sucursal, categoria, prioridad, descripcion, telefono, equipo,
-        group_message_id, json.dumps(payload, ensure_ascii=False)
-    ))
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            created_at,
+            bot_name,
+            chat_id,
+            client_user_name,
+            description,
+            cause,
+            solution,
+            group_message_id,
+            json.dumps(clean_payload, ensure_ascii=False),
+        ),
+    )
 
     conn.commit()
     ticket_id = int(cur.lastrowid)
     conn.close()
     return ticket_id
+
 
 def db_update_group_message_id(ticket_id: int, group_message_id: int):
     conn = db_connect()
@@ -141,6 +146,7 @@ def db_update_group_message_id(ticket_id: int, group_message_id: int):
     cur.execute("UPDATE tickets SET group_message_id=? WHERE id=?", (group_message_id, ticket_id))
     conn.commit()
     conn.close()
+
 
 def db_get_ticket(ticket_id: int):
     conn = db_connect()
@@ -150,23 +156,30 @@ def db_get_ticket(ticket_id: int):
     conn.close()
     return row
 
+
 # ----------------------------
 # TELEGRAM API (requests)
 # ----------------------------
 def telegram_api(token: str) -> str:
     return f"https://api.telegram.org/bot{token}"
 
+
 def tg_send_message(token: str, chat_id: int, text: str, parse_mode: str = "HTML"):
     url = f"{telegram_api(token)}/sendMessage"
-    r = requests.post(url, json={
-        "chat_id": chat_id,
-        "text": text,
-        "parse_mode": parse_mode,
-        "disable_web_page_preview": True
-    }, timeout=30)
+    r = requests.post(
+        url,
+        json={
+            "chat_id": chat_id,
+            "text": text,
+            "parse_mode": parse_mode,
+            "disable_web_page_preview": True,
+        },
+        timeout=30,
+    )
     if not r.ok:
         raise HTTPException(status_code=502, detail=f"Telegram sendMessage falló: {r.text}")
     return r.json()
+
 
 def tg_send_photo(token: str, chat_id: int, caption: str, file_bytes: bytes, filename: str = "screenshot.jpg"):
     url = f"{telegram_api(token)}/sendPhoto"
@@ -177,41 +190,57 @@ def tg_send_photo(token: str, chat_id: int, caption: str, file_bytes: bytes, fil
         raise HTTPException(status_code=502, detail=f"Telegram sendPhoto falló: {r.text}")
     return r.json()
 
+
 def pick_token(bot_name: str) -> str:
     token = BOT_TOKENS.get(bot_name, "").strip()
     if not token:
         raise HTTPException(status_code=400, detail=f"bot_name inválido. Usa: {list(BOT_TOKENS.keys())}")
     return token
 
+
+# ----------------------------
+# TICKET TEXT
+# ----------------------------
 def make_ticket_text(p: dict, ticket_id: int) -> str:
     bot_name = escape(str(p.get("bot_name", "")))
-    categoria = escape(str(p.get("categoria", "Sin categoría")))
-    usuario = escape(str(p.get("usuario", "Sin usuario")))
-    sucursal = escape(str(p.get("sucursal", "Sin sucursal")))
-    descripcion = escape(str(p.get("descripcion", "Sin descripción")))
-    telefono = escape(str(p.get("telefono", "")))
-    equipo = escape(str(p.get("equipo", "")))
-    prioridad = escape(str(p.get("prioridad", "Normal")))
-    reporter_name = escape(str(p.get("reporter_name", "")))
+    client_user_name = escape(str(p.get("client_user_name", "—")))
+
+    chat_id = p.get("chat_id", "")
+    try:
+        chat_id = int(chat_id) if chat_id not in ("", None) else ""
+    except:
+        chat_id = ""
+
+    description = escape(str(p.get("description", "Sin descripción")))
+    cause = escape(str(p.get("cause", "")))
+    solution = escape(str(p.get("solution", "")))
 
     parts = []
     parts.append(f"🧾 <b>NUEVO TICKET</b>  <b>#TICKET-{ticket_id}</b>")
     parts.append(f"🤖 <b>Bot:</b> {bot_name}")
-    if reporter_name:
-        parts.append(f"👥 <b>Cliente:</b> {reporter_name}")
-    parts.append(f"🏷️ <b>Categoría:</b> {categoria}")
-    parts.append(f"⚡ <b>Prioridad:</b> {prioridad}")
-    parts.append(f"👤 <b>Usuario:</b> {usuario}")
-    parts.append(f"🏢 <b>Sucursal:</b> {sucursal}")
-    if telefono:
-        parts.append(f"📞 <b>Tel:</b> {telefono}")
-    if equipo:
-        parts.append(f"💻 <b>Equipo:</b> {equipo}")
+
+    if client_user_name:
+        parts.append(f"👤 <b>Cliente:</b> {client_user_name}")
+
+    if chat_id != "":
+        parts.append(f"🆔 <b>Chat ID:</b> {chat_id}")
+
     parts.append("")
-    parts.append(f"📝 <b>Descripción:</b>\n{descripcion}")
+    parts.append(f"⚠️ <b>Descripción:</b>\n{description}")
+
+    if cause:
+        parts.append("")
+        parts.append(f"🔎 <b>Causa:</b> {cause}")
+
+    if solution:
+        parts.append("")
+        parts.append(f"✅ <b>Solución:</b> {solution}")
+
     parts.append("")
     parts.append("↩️ <i>Para responder: responde a este mensaje con</i> <b>/r tu mensaje</b>")
+
     return "\n".join(parts)
+
 
 # ----------------------------
 # FASTAPI
@@ -234,7 +263,7 @@ def root():
         "service": "telegram-multibot-backend+listener",
         "bots": list(BOT_TOKENS.keys()),
         "db_path": DB_PATH,
-        "listener": ENABLE_LISTENER
+        "listener": ENABLE_LISTENER,
     }
 
 @app.post("/ticket")
@@ -253,7 +282,7 @@ async def create_ticket(
 
     token = pick_token(bot_name)
 
-    # Guardamos primero (group_message_id aún no lo sabemos)
+    # Guardar ticket (aún no sabemos message_id del grupo)
     ticket_id = db_insert_ticket(p, group_message_id=None)
 
     text = make_ticket_text(p, ticket_id)
@@ -283,17 +312,19 @@ async def r_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
     chat = update.effective_chat
 
-    # Solo grupos
     if not chat or chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
         return
 
-    # Debe ser reply
-    if not msg.reply_to_message or not msg.reply_to_message.text:
+    if not msg.reply_to_message:
         await msg.reply_text("⚠️ Responde (reply) al ticket y escribe: /r tu mensaje")
         return
 
-    # Extraer ticket_id del mensaje respondido
-    m = TICKET_RE.search(msg.reply_to_message.text)
+    replied_text = msg.reply_to_message.text or msg.reply_to_message.caption or ""
+    if not replied_text:
+        await msg.reply_text("⚠️ El mensaje respondido no tiene texto/caption para leer el #TICKET.")
+        return
+
+    m = TICKET_RE.search(replied_text)
     if not m:
         await msg.reply_text("⚠️ No encuentro el #TICKET-123 en el mensaje respondido.")
         return
@@ -304,22 +335,19 @@ async def r_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text(f"⚠️ No existe #TICKET-{ticket_id} en la base.")
         return
 
-    reporter_chat_id = ticket["reporter_chat_id"]
+    chat_id = ticket["chat_id"]
     bot_name = ticket["bot_name"]
 
-    if not reporter_chat_id:
-        await msg.reply_text("⚠️ Este ticket no tiene reporter_chat_id guardado (no puedo responder al cliente).")
+    if not chat_id:
+        await msg.reply_text("⚠️ Este ticket no tiene chat_id guardado (no puedo responder al cliente).")
         return
 
-    # Texto de respuesta (lo que viene después de /r)
-    # Telegram manda "/r ..." como texto completo
     raw = msg.text or ""
     answer = raw.split(" ", 1)[1].strip() if " " in raw else ""
     if not answer:
-        await msg.reply_text("⚠️ Escribe tu respuesta: /r tu mensaje")
+        await msg.reply_text("⚠️ Usa: /r tu mensaje")
         return
 
-    # Enviar al cliente usando el BOT correcto del ticket
     token = pick_token(bot_name)
     final_text = (
         f"📩 <b>Respuesta de Soporte</b>\n"
@@ -327,19 +355,20 @@ async def r_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"{escape(answer)}"
     )
 
-    # Mandar al usuario
     try:
-        tg_send_message(token, int(reporter_chat_id), final_text)
-        await msg.reply_text(f"✅ Enviado al cliente por <b>{escape(bot_name)}</b>.", parse_mode="HTML")
+        tg_send_message(token, int(chat_id), final_text)
+        await msg.reply_text(f"✅ Respuesta enviada al cliente por <b>{escape(bot_name)}</b>.", parse_mode="HTML")
     except Exception as e:
         await msg.reply_text(f"❌ No pude enviar al cliente: {e}")
 
+
+# ----------------------------
+# START LISTENERS (1 thread por bot)
+# ----------------------------
 def start_listener_threads_once():
-    # Importante: para evitar duplicados, en Render usa 1 solo proceso (sin gunicorn multiworkers).
     def run_bot_polling(token: str, name: str):
         application = ApplicationBuilder().token(token).build()
         application.add_handler(CommandHandler("r", r_command, filters.ChatType.GROUPS))
-
         print(f"✅ Listener activo para bot: {name}")
         application.run_polling(allowed_updates=["message"])
 
@@ -351,4 +380,3 @@ def start_listener_threads_once():
 def on_startup():
     if ENABLE_LISTENER:
         start_listener_threads_once()
-
