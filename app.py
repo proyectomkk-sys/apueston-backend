@@ -7,6 +7,7 @@ from fastapi import FastAPI, Request, HTTPException
 # CONFIG
 # =========================================================
 SUPPORT_GROUP_ID = int(os.getenv("SUPPORT_GROUP_ID", "-1003575621343"))  # tu grupo soporte
+REPLY_DISPATCHER_BOT_KEY = os.getenv("REPLY_DISPATCHER_BOT_KEY", "bot_a")
 
 # Define tus bots aquí (keys = nombres en la URL)
 # Debes setear en variables de entorno:
@@ -127,57 +128,72 @@ async def telegram_webhook(bot_key: str, req: Request):
         data = cq.get("data", "")
         callback_id = cq.get("id")
 
-        # data esperado: "report:300"
-        if data.startswith("report:"):
-            error_code = data.split(":", 1)[1].strip()
-
-            from_user = cq.get("from", {})
-            msg = cq.get("message", {})
-            chat = msg.get("chat", {})  # chat donde se presionó el botón (cliente)
-
-            client_chat_id = chat.get("id")
-            full_name = (from_user.get("first_name", "") + " " + from_user.get("last_name", "")).strip()
-            username = from_user.get("username")
-            uname = f"@{username}" if username else "(sin username)"
-
-            ticket_text = (
-                f"{TICKET_TAG}\n"
-                f"🤖 Bot: {bot_display}\n"
-                f"BotKey: {bot_key}\n"
-                f"👤 Cliente: {full_name} {uname}\n"
-                f"ChatID: {client_chat_id}\n"
-                f"⚠️ Error: Error {error_code}\n"
-                f"📝 Detalle: -\n"
-                f"🧩 Causa: -\n"
-                f"✅ Solución: -\n\n"
-                f"↩️ Responde a ESTE mensaje con:\n"
-                f"/r tu respuesta aquí"
-            )
-
-            # enviamos al grupo soporte
-            send_message(bot_key, SUPPORT_GROUP_ID, ticket_text)
-
-            # 2️⃣ Quitar botón REPORTAR para evitar doble click
         try:
-            msg_obj = cq.get("message", {})
-            edit_reply_markup(
-                bot_key,
-                client_chat_id,
-                msg_obj.get("message_id"),
-                {"inline_keyboard": []}
-            )
+            # Cerrar el spinner SIEMPRE primero
+            answer_callback_query(bot_key, callback_id, "Procesando…", show_alert=False)
+
+            if data.startswith("report:"):
+                error_code = data.split(":", 1)[1].strip()
+
+                from_user = cq.get("from", {})
+                msg = cq.get("message", {})
+                chat = msg.get("chat", {})
+
+                # ⚠️ Para responder al cliente, lo más seguro es usar el chat del mensaje
+                client_chat_id = chat.get("id")
+                # y como backup, el id del usuario que presionó
+                from_id = from_user.get("id")
+
+                full_name = (from_user.get("first_name", "") + " " + from_user.get("last_name", "")).strip()
+                username = from_user.get("username")
+                uname = f"@{username}" if username else "(sin username)"
+
+                ticket_text = (
+                    f"{TICKET_TAG}\n"
+                    f"🤖 Bot: {bot_display}\n"
+                    f"BotKey: {bot_key}\n"
+                    f"👤 Cliente: {full_name} {uname}\n"
+                    f"ChatID: {client_chat_id}\n"
+                    f"⚠️ Error: Error {error_code}\n"
+                    f"📝 Detalle: -\n"
+                    f"🧩 Causa: -\n"
+                    f"✅ Solución: -\n\n"
+                    f"↩️ Responde a ESTE mensaje con:\n"
+                    f"/r tu respuesta aquí"
+                )
+
+                # 1) Enviar ticket al grupo
+                send_message(bot_key, SUPPORT_GROUP_ID, ticket_text)
+
+                # 2) Quitar botón (si falla, no importa)
+                try:
+                    msg_obj = cq.get("message", {})
+                    edit_reply_markup(
+                        bot_key,
+                        client_chat_id,
+                        msg_obj.get("message_id"),
+                        {"inline_keyboard": []}
+                    )
+                except Exception:
+                    pass
+
+                # 3) Confirmación al cliente (si client_chat_id viene None, usa from_id)
+                target_chat = client_chat_id if isinstance(client_chat_id, int) else from_id
+                if isinstance(target_chat, int):
+                    send_message(bot_key, target_chat, "✅ Tu reporte fue enviado. En breve soporte se comunicará contigo.")
+
+                # 4) Cerrar callback con OK final
+                answer_callback_query(bot_key, callback_id, "Reporte enviado ✅", show_alert=False)
+
         except Exception:
-            pass
-
-            # confirmación al cliente
-            send_message(bot_key, client_chat_id, "✅ Tu reporte fue enviado. En breve soporte se comunicará contigo.")
-
-            
-
-            # cerramos callback
-            answer_callback_query(bot_key, callback_id, "Reporte enviado ✅", show_alert=False)
+            # No dejes que el webhook devuelva 500 (evita reintentos)
+            try:
+                answer_callback_query(bot_key, callback_id, "Listo ✅", show_alert=False)
+            except Exception:
+                pass
 
         return {"ok": True}
+
 
     # ----------------------------
     # 2) Mensajes (comandos /start /prueba /getchatid y /r en grupo)
@@ -210,6 +226,10 @@ async def telegram_webhook(bot_key: str, req: Request):
         # Nota: Telegram puede mandar "/r@TuBot" también
         # /r (solo en el grupo soporte y como reply a ticket)
         if chat_id == SUPPORT_GROUP_ID and (text.startswith("/r") or text.startswith("/r@")):
+            # Solo el dispatcher procesa /r en el grupo (evita duplicados y evita depender de que bot_b reciba el update)
+            if bot_key != REPLY_DISPATCHER_BOT_KEY:
+                return {"ok": True}
+
             reply_to = msg.get("reply_to_message")
             if not reply_to or not (reply_to.get("text") or ""):
                 send_message(bot_key, chat_id, "⚠️ Debes responder (reply) al mensaje del ticket y escribir: /r tu respuesta")
