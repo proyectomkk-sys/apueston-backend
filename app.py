@@ -110,7 +110,7 @@ async def telegram_webhook(req: Request):
         if text.startswith("/prueba"):
             kb = {
                 "inline_keyboard": [
-                    [{"text": "REPORTAR", "callback_data": "report:300"}]
+                    [{"text": "📩 REPORTAR", "callback_data": "report:300"}]
                 ]
             }
             send_message(chat_id, ERROR_TEXT, reply_markup=kb)
@@ -150,10 +150,8 @@ async def telegram_webhook(req: Request):
                 send_message(chat_id, "⚠️ Escribe algo después de /r. Ej: /r Ya te ayudamos con el biométrico.")
                 return {"ok": True}
 
-            send_message(client_chat_id, f"📩 Soporte: {reply_text}")
+            send_message(client_chat_id, f"🤓 Soporte: {reply_text}")
             send_message(chat_id, "✅ Respuesta enviada al cliente.")
             return {"ok": True}
 
-
     return {"ok": True}
-
