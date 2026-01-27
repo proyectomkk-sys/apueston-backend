@@ -8,9 +8,6 @@ from fastapi import FastAPI, Request, HTTPException
 # =========================================================
 SUPPORT_GROUP_ID = int(os.getenv("SUPPORT_GROUP_ID", "-1003575621343"))  # tu grupo soporte
 
-# Define tus bots aquí (keys = nombres en la URL)
-# Debes setear en variables de entorno:
-#   BOT_TOKEN_A, BOT_TOKEN_B, ...
 BOTS = {
     "bot_a": {
         "token_env": "BOT_TOKEN_A",
@@ -24,8 +21,6 @@ BOTS = {
         "default_error_code": "601",
         "default_error_text": "Error 601, la página necesita biométrico",
     },
-    # Agrega más aquí:
-    # "bot_c": {"token_env":"BOT_TOKEN_C","display":"Otro Bot", ...},
 }
 
 # =========================================================
@@ -58,7 +53,13 @@ def tg(bot_key: str, method: str, payload: dict):
         raise RuntimeError(f"Telegram API error calling {method}: {data}")
     return data["result"]
 
-def send_message(bot_key: str, chat_id: int, text: str, reply_to_message_id: int | None = None, reply_markup: dict | None = None):
+def send_message(
+    bot_key: str,
+    chat_id: int,
+    text: str,
+    reply_to_message_id: int | None = None,
+    reply_markup: dict | None = None
+):
     payload = {"chat_id": chat_id, "text": text}
     if reply_to_message_id:
         payload["reply_to_message_id"] = reply_to_message_id
@@ -70,8 +71,16 @@ def answer_callback_query(bot_key: str, callback_query_id: str, text: str = "", 
     payload = {"callback_query_id": callback_query_id, "text": text, "show_alert": show_alert}
     return tg(bot_key, "answerCallbackQuery", payload)
 
+# ✅ NUEVO: quitar teclado (botón) del mensaje original
+def remove_inline_keyboard(bot_key: str, chat_id: int, message_id: int):
+    payload = {
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "reply_markup": {"inline_keyboard": []},  # vacío = desaparece
+    }
+    return tg(bot_key, "editMessageReplyMarkup", payload)
+
 def parse_ticket_botkey(text: str) -> str | None:
-    # Busca una línea como: "BotKey: bot_a"
     m = re.search(r"BotKey:\s*([a-zA-Z0-9_]+)", text)
     return m.group(1) if m else None
 
@@ -103,15 +112,16 @@ async def telegram_webhook(bot_key: str, req: Request):
         data = cq.get("data", "")
         callback_id = cq.get("id")
 
-        # data esperado: "report:300"
         if data.startswith("report:"):
             error_code = data.split(":", 1)[1].strip()
 
             from_user = cq.get("from", {})
             msg = cq.get("message", {})
-            chat = msg.get("chat", {})  # chat donde se presionó el botón (cliente)
+            chat = msg.get("chat", {})
 
             client_chat_id = chat.get("id")
+            client_message_id = msg.get("message_id")  # ✅ para editar y quitar botón
+
             full_name = (from_user.get("first_name", "") + " " + from_user.get("last_name", "")).strip()
             username = from_user.get("username")
             uname = f"@{username}" if username else "(sin username)"
@@ -129,6 +139,13 @@ async def telegram_webhook(bot_key: str, req: Request):
                 f"↩️ Responde a ESTE mensaje con:\n"
                 f"/r tu respuesta aquí"
             )
+
+            # ✅ PROBLEMA 1: quitar el botón para evitar doble ticket
+            # (si falla por cualquier cosa, igual seguimos)
+            try:
+                remove_inline_keyboard(bot_key, client_chat_id, client_message_id)
+            except Exception:
+                pass
 
             # enviamos al grupo soporte
             send_message(bot_key, SUPPORT_GROUP_ID, ticket_text)
@@ -150,12 +167,10 @@ async def telegram_webhook(bot_key: str, req: Request):
         chat_id = chat.get("id")
         text = (msg.get("text", "") or "").strip()
 
-        # /start
         if text.startswith("/start"):
             send_message(bot_key, chat_id, f"Hola 👋\nUsa /prueba para ver el error con el botón REPORTAR.\nBot: {bot_display}")
             return {"ok": True}
 
-        # /prueba (cliente)
         if text.startswith("/prueba"):
             err_text = BOTS[bot_key]["default_error_text"]
             err_code = BOTS[bot_key]["default_error_code"]
@@ -163,13 +178,11 @@ async def telegram_webhook(bot_key: str, req: Request):
             send_message(bot_key, chat_id, err_text, reply_markup=kb)
             return {"ok": True}
 
-        # /getchatid
         if text.startswith("/getchatid"):
             send_message(bot_key, chat_id, f"chat_id de este chat/grupo: {chat_id}")
             return {"ok": True}
 
         # /r (solo en el grupo soporte y como reply a ticket)
-        # Nota: Telegram puede mandar "/r@TuBot" también
         if chat_id == SUPPORT_GROUP_ID and (text.startswith("/r") or text.startswith("/r@")):
             reply_to = msg.get("reply_to_message")
             if not reply_to or not (reply_to.get("text") or ""):
@@ -187,6 +200,11 @@ async def telegram_webhook(bot_key: str, req: Request):
                 send_message(bot_key, chat_id, "⚠️ No pude determinar el bot del ticket (BotKey inválido).")
                 return {"ok": True}
 
+            # ✅ PROBLEMA 2 y 3: si este webhook NO es del bot dueño del ticket, IGNORAR.
+            # Esto evita confirmación doble y evita enviar 2 veces al cliente.
+            if bot_key != ticket_bot_key:
+                return {"ok": True}
+
             m = CHATID_RE.search(replied_text)
             if not m:
                 send_message(bot_key, chat_id, "⚠️ No encontré ChatID en el ticket.")
@@ -194,7 +212,6 @@ async def telegram_webhook(bot_key: str, req: Request):
 
             client_chat_id = int(m.group(1))
 
-            # extraer respuesta (quita "/r" o "/r@bot")
             reply_text = re.sub(r"^/r(@\w+)?\s*", "", text).strip()
             if not reply_text:
                 send_message(bot_key, chat_id, "⚠️ Escribe algo después de /r. Ej: /r Ya te ayudamos con el biométrico.")
