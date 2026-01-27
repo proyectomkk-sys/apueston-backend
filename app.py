@@ -7,7 +7,6 @@ from fastapi import FastAPI, Request, HTTPException
 # CONFIG
 # =========================================================
 SUPPORT_GROUP_ID = int(os.getenv("SUPPORT_GROUP_ID", "-1003575621343"))  # tu grupo soporte
-REPLY_DISPATCHER_BOT_KEY = os.getenv("REPLY_DISPATCHER_BOT_KEY", "bot_a")
 
 # Define tus bots aquí (keys = nombres en la URL)
 # Debes setear en variables de entorno:
@@ -226,10 +225,6 @@ async def telegram_webhook(bot_key: str, req: Request):
         # Nota: Telegram puede mandar "/r@TuBot" también
         # /r (solo en el grupo soporte y como reply a ticket)
         if chat_id == SUPPORT_GROUP_ID and (text.startswith("/r") or text.startswith("/r@")):
-            # Solo el dispatcher procesa /r en el grupo (evita duplicados y evita depender de que bot_b reciba el update)
-            if bot_key != REPLY_DISPATCHER_BOT_KEY:
-                return {"ok": True}
-
             reply_to = msg.get("reply_to_message")
             if not reply_to or not (reply_to.get("text") or ""):
                 send_message(bot_key, chat_id, "⚠️ Debes responder (reply) al mensaje del ticket y escribir: /r tu respuesta")
