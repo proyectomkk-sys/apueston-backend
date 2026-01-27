@@ -1,5 +1,6 @@
 # app.py
 import re
+import os
 import requests
 from fastapi import FastAPI, Request
 
@@ -155,3 +156,4 @@ async def telegram_webhook(req: Request):
 
 
     return {"ok": True}
+
