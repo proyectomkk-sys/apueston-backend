@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request
 # =========================================================
 # CONFIG (SIN ENV LOCALES): PEGA TUS DATOS AQUÍ
 # =========================================================
-BOT_TOKEN = "8213391762:AAE2F_CbHIup8QvMBQ-cngMU40ZqNtTr1_o"
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 SUPPORT_GROUP_ID = -1003575621343  # PEGA AQUI EL CHAT_ID REAL DEL GRUPO (empieza con -100)
 BOT_DISPLAY_NAME = "Soporte BotMakers"  # nombre bonito para tickets (opcional)
 
@@ -152,5 +152,6 @@ async def telegram_webhook(req: Request):
             send_message(client_chat_id, f"📩 Soporte: {reply_text}")
             send_message(chat_id, "✅ Respuesta enviada al cliente.")
             return {"ok": True}
+
 
     return {"ok": True}
