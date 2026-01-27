@@ -208,39 +208,43 @@ async def telegram_webhook(bot_key: str, req: Request):
 
         # /r (solo en el grupo soporte y como reply a ticket)
         # Nota: Telegram puede mandar "/r@TuBot" también
+        # /r (solo en el grupo soporte y como reply a ticket)
         if chat_id == SUPPORT_GROUP_ID and (text.startswith("/r") or text.startswith("/r@")):
             reply_to = msg.get("reply_to_message")
             if not reply_to or not (reply_to.get("text") or ""):
                 send_message(bot_key, chat_id, "⚠️ Debes responder (reply) al mensaje del ticket y escribir: /r tu respuesta")
-                return {"ok": True}
-
-            replied_text = (reply_to.get("text") or "")
-            if TICKET_TAG not in replied_text:
-                send_message(bot_key, chat_id, "⚠️ El mensaje respondido no parece un ticket.")
-                return {"ok": True}
-
-            # Detectar a qué bot pertenece ese ticket
-            ticket_bot_key = parse_ticket_botkey(replied_text) or bot_key
-            if ticket_bot_key not in BOTS:
-                send_message(bot_key, chat_id, "⚠️ No pude determinar el bot del ticket (BotKey inválido).")
-                return {"ok": True}
-
-            m = CHATID_RE.search(replied_text)
-            if not m:
-                send_message(bot_key, chat_id, "⚠️ No encontré ChatID en el ticket.")
-                return {"ok": True}
-
-            client_chat_id = int(m.group(1))
-
-            # extraer respuesta (quita "/r" o "/r@bot")
-            reply_text = re.sub(r"^/r(@\w+)?\s*", "", text).strip()
-            if not reply_text:
-                send_message(bot_key, chat_id, "⚠️ Escribe algo después de /r. Ej: /r Ya te ayudamos con el biométrico.")
-                return {"ok": True}
-
-            # RESPONDER al cliente usando el bot correcto del ticket
-            send_message(ticket_bot_key, client_chat_id, f"🤓 Soporte: {reply_text}")
-            send_message(bot_key, chat_id, f"✅ Respuesta enviada al cliente usando {ticket_bot_key}.")
             return {"ok": True}
+
+        replied_text = (reply_to.get("text") or "")
+        if TICKET_TAG not in replied_text:
+            send_message(bot_key, chat_id, "⚠️ El mensaje respondido no parece un ticket.")
+            return {"ok": True}
+
+        # Detectar a qué bot pertenece ese ticket (OBLIGATORIO)
+        ticket_bot_key = parse_ticket_botkey(replied_text)
+        if not ticket_bot_key:
+            send_message(bot_key, chat_id, "⚠️ Este ticket no tiene BotKey. No puedo saber qué bot debe responder.")
+            return {"ok": True}
+        # ✅ CLAVE: si este webhook NO es el bot del ticket, IGNORAR para evitar duplicados
+        if ticket_bot_key != bot_key:
+            return {"ok": True}
+        
+        m = CHATID_RE.search(replied_text)
+        if not m:
+            send_message(bot_key, chat_id, "⚠️ No encontré ChatID en el ticket.")
+            return {"ok": True}
+
+        client_chat_id = int(m.group(1))
+
+        # extraer respuesta
+        reply_text = re.sub(r"^/r(@\w+)?\s*", "", text).strip()
+        if not reply_text:
+            send_message(bot_key, chat_id, "⚠️ Escribe algo después de /r. Ej: /r Ya te ayudamos.")
+            return {"ok": True}
+
+        # ✅ Como ticket_bot_key == bot_key, respondemos con ESTE bot
+        send_message(bot_key, client_chat_id, f"🤓 Soporte: {reply_text}")
+        send_message(bot_key, chat_id, f"✅ Respuesta enviada al cliente usando {bot_key}.")
+        return {"ok": True}
 
     return {"ok": True}
