@@ -33,6 +33,23 @@ BOTS = {
 # =========================================================
 app = FastAPI()
 
+from collections import deque
+
+PROCESSED = set()
+PROCESSED_Q = deque(maxlen=5000)
+
+def seen(update_id: int) -> bool:
+    if update_id in PROCESSED:
+        return True
+    PROCESSED.add(update_id)
+    PROCESSED_Q.append(update_id)
+    # limpieza cuando el deque expulsa
+    if len(PROCESSED) > 6000:
+        while len(PROCESSED) > 5000:
+            PROCESSED.discard(PROCESSED_Q.popleft())
+    return False
+
+
 CHATID_RE = re.compile(r"ChatID:\s*(-?\d+)")
 TICKET_TAG = "🧾 TICKET"
 
@@ -75,6 +92,10 @@ def parse_ticket_botkey(text: str) -> str | None:
     m = re.search(r"BotKey:\s*([a-zA-Z0-9_]+)", text)
     return m.group(1) if m else None
 
+def edit_reply_markup(bot_key: str, chat_id: int, message_id: int, reply_markup: dict | None):
+    payload = {"chat_id": chat_id, "message_id": message_id, "reply_markup": reply_markup}
+    return tg(bot_key, "editMessageReplyMarkup", payload)
+
 # =========================================================
 # Health
 # =========================================================
@@ -93,6 +114,9 @@ async def telegram_webhook(bot_key: str, req: Request):
         raise HTTPException(status_code=404, detail="Bot no registrado (bot_key inválido).")
 
     update = await req.json()
+    update_id = update.get("update_id")
+    if isinstance(update_id, int) and seen(update_id):
+        return {"ok": True}
     bot_display = BOTS[bot_key]["display"]
 
     # ----------------------------
@@ -133,8 +157,22 @@ async def telegram_webhook(bot_key: str, req: Request):
             # enviamos al grupo soporte
             send_message(bot_key, SUPPORT_GROUP_ID, ticket_text)
 
+            # 2️⃣ Quitar botón REPORTAR para evitar doble click
+        try:
+            msg_obj = cq.get("message", {})
+            edit_reply_markup(
+                bot_key,
+                client_chat_id,
+                msg_obj.get("message_id"),
+                {"inline_keyboard": []}
+            )
+        except Exception:
+            pass
+
             # confirmación al cliente
             send_message(bot_key, client_chat_id, "✅ Tu reporte fue enviado. En breve soporte se comunicará contigo.")
+
+            
 
             # cerramos callback
             answer_callback_query(bot_key, callback_id, "Reporte enviado ✅", show_alert=False)
