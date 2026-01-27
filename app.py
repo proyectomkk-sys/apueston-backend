@@ -14,7 +14,7 @@ SUPPORT_GROUP_ID = int(os.getenv("SUPPORT_GROUP_ID", "-1003575621343"))  # tu gr
 BOTS = {
     "bot_a": {
         "token_env": "BOT_TOKEN_A",
-        "display": "Ayuda Cajero-Referidor",
+        "display": "Ayuda Cajero Referidor",
         "default_error_code": "300",
         "default_error_text": "Error 300, Metabet requiere biométrico",
     },
@@ -32,23 +32,6 @@ BOTS = {
 # APP
 # =========================================================
 app = FastAPI()
-
-from collections import deque
-
-PROCESSED = set()
-PROCESSED_Q = deque(maxlen=5000)
-
-def seen(update_id: int) -> bool:
-    if update_id in PROCESSED:
-        return True
-    PROCESSED.add(update_id)
-    PROCESSED_Q.append(update_id)
-    # limpieza cuando el deque expulsa
-    if len(PROCESSED) > 6000:
-        while len(PROCESSED) > 5000:
-            PROCESSED.discard(PROCESSED_Q.popleft())
-    return False
-
 
 CHATID_RE = re.compile(r"ChatID:\s*(-?\d+)")
 TICKET_TAG = "🧾 TICKET"
@@ -92,10 +75,6 @@ def parse_ticket_botkey(text: str) -> str | None:
     m = re.search(r"BotKey:\s*([a-zA-Z0-9_]+)", text)
     return m.group(1) if m else None
 
-def edit_reply_markup(bot_key: str, chat_id: int, message_id: int, reply_markup: dict | None):
-    payload = {"chat_id": chat_id, "message_id": message_id, "reply_markup": reply_markup}
-    return tg(bot_key, "editMessageReplyMarkup", payload)
-
 # =========================================================
 # Health
 # =========================================================
@@ -114,9 +93,6 @@ async def telegram_webhook(bot_key: str, req: Request):
         raise HTTPException(status_code=404, detail="Bot no registrado (bot_key inválido).")
 
     update = await req.json()
-    update_id = update.get("update_id")
-    if isinstance(update_id, int) and seen(update_id):
-        return {"ok": True}
     bot_display = BOTS[bot_key]["display"]
 
     # ----------------------------
@@ -127,72 +103,43 @@ async def telegram_webhook(bot_key: str, req: Request):
         data = cq.get("data", "")
         callback_id = cq.get("id")
 
-        try:
-            # Cerrar el spinner SIEMPRE primero
-            answer_callback_query(bot_key, callback_id, "Procesando…", show_alert=False)
+        # data esperado: "report:300"
+        if data.startswith("report:"):
+            error_code = data.split(":", 1)[1].strip()
 
-            if data.startswith("report:"):
-                error_code = data.split(":", 1)[1].strip()
+            from_user = cq.get("from", {})
+            msg = cq.get("message", {})
+            chat = msg.get("chat", {})  # chat donde se presionó el botón (cliente)
 
-                from_user = cq.get("from", {})
-                msg = cq.get("message", {})
-                chat = msg.get("chat", {})
+            client_chat_id = chat.get("id")
+            full_name = (from_user.get("first_name", "") + " " + from_user.get("last_name", "")).strip()
+            username = from_user.get("username")
+            uname = f"@{username}" if username else "(sin username)"
 
-                # ⚠️ Para responder al cliente, lo más seguro es usar el chat del mensaje
-                client_chat_id = chat.get("id")
-                # y como backup, el id del usuario que presionó
-                from_id = from_user.get("id")
+            ticket_text = (
+                f"{TICKET_TAG}\n"
+                f"🤖 Bot: {bot_display}\n"
+                f"BotKey: {bot_key}\n"
+                f"👤 Cliente: {full_name} {uname}\n"
+                f"ChatID: {client_chat_id}\n"
+                f"⚠️ Error: Error {error_code}\n"
+                f"📝 Detalle: -\n"
+                f"🧩 Causa: -\n"
+                f"✅ Solución: -\n\n"
+                f"↩️ Responde a ESTE mensaje con:\n"
+                f"/r tu respuesta aquí"
+            )
 
-                full_name = (from_user.get("first_name", "") + " " + from_user.get("last_name", "")).strip()
-                username = from_user.get("username")
-                uname = f"@{username}" if username else "(sin username)"
+            # enviamos al grupo soporte
+            send_message(bot_key, SUPPORT_GROUP_ID, ticket_text)
 
-                ticket_text = (
-                    f"{TICKET_TAG}\n"
-                    f"🤖 Bot: {bot_display}\n"
-                    f"BotKey: {bot_key}\n"
-                    f"👤 Cliente: {full_name} {uname}\n"
-                    f"ChatID: {client_chat_id}\n"
-                    f"⚠️ Error: Error {error_code}\n"
-                    f"📝 Detalle: -\n"
-                    f"🧩 Causa: -\n"
-                    f"✅ Solución: -\n\n"
-                    f"↩️ Responde a ESTE mensaje con:\n"
-                    f"/r tu respuesta aquí"
-                )
+            # confirmación al cliente
+            send_message(bot_key, client_chat_id, "✅ Tu reporte fue enviado. En breve soporte se comunicará contigo.")
 
-                # 1) Enviar ticket al grupo
-                send_message(bot_key, SUPPORT_GROUP_ID, ticket_text)
-
-                # 2) Quitar botón (si falla, no importa)
-                try:
-                    msg_obj = cq.get("message", {})
-                    edit_reply_markup(
-                        bot_key,
-                        client_chat_id,
-                        msg_obj.get("message_id"),
-                        {"inline_keyboard": []}
-                    )
-                except Exception:
-                    pass
-
-                # 3) Confirmación al cliente (si client_chat_id viene None, usa from_id)
-                target_chat = client_chat_id if isinstance(client_chat_id, int) else from_id
-                if isinstance(target_chat, int):
-                    send_message(bot_key, target_chat, "✅ Tu reporte fue enviado. En breve soporte se comunicará contigo.")
-
-                # 4) Cerrar callback con OK final
-                answer_callback_query(bot_key, callback_id, "Reporte enviado ✅", show_alert=False)
-
-        except Exception:
-            # No dejes que el webhook devuelva 500 (evita reintentos)
-            try:
-                answer_callback_query(bot_key, callback_id, "Listo ✅", show_alert=False)
-            except Exception:
-                pass
+            # cerramos callback
+            answer_callback_query(bot_key, callback_id, "Reporte enviado ✅", show_alert=False)
 
         return {"ok": True}
-
 
     # ----------------------------
     # 2) Mensajes (comandos /start /prueba /getchatid y /r en grupo)
@@ -223,43 +170,39 @@ async def telegram_webhook(bot_key: str, req: Request):
 
         # /r (solo en el grupo soporte y como reply a ticket)
         # Nota: Telegram puede mandar "/r@TuBot" también
-        # /r (solo en el grupo soporte y como reply a ticket)
         if chat_id == SUPPORT_GROUP_ID and (text.startswith("/r") or text.startswith("/r@")):
             reply_to = msg.get("reply_to_message")
             if not reply_to or not (reply_to.get("text") or ""):
                 send_message(bot_key, chat_id, "⚠️ Debes responder (reply) al mensaje del ticket y escribir: /r tu respuesta")
-            return {"ok": True}
+                return {"ok": True}
 
-        replied_text = (reply_to.get("text") or "")
-        if TICKET_TAG not in replied_text:
-            send_message(bot_key, chat_id, "⚠️ El mensaje respondido no parece un ticket.")
-            return {"ok": True}
+            replied_text = (reply_to.get("text") or "")
+            if TICKET_TAG not in replied_text:
+                send_message(bot_key, chat_id, "⚠️ El mensaje respondido no parece un ticket.")
+                return {"ok": True}
 
-        # Detectar a qué bot pertenece ese ticket (OBLIGATORIO)
-        ticket_bot_key = parse_ticket_botkey(replied_text)
-        if not ticket_bot_key:
-            send_message(bot_key, chat_id, "⚠️ Este ticket no tiene BotKey. No puedo saber qué bot debe responder.")
-            return {"ok": True}
-        # ✅ CLAVE: si este webhook NO es el bot del ticket, IGNORAR para evitar duplicados
-        if ticket_bot_key != bot_key:
-            return {"ok": True}
-        
-        m = CHATID_RE.search(replied_text)
-        if not m:
-            send_message(bot_key, chat_id, "⚠️ No encontré ChatID en el ticket.")
-            return {"ok": True}
+            # Detectar a qué bot pertenece ese ticket
+            ticket_bot_key = parse_ticket_botkey(replied_text) or bot_key
+            if ticket_bot_key not in BOTS:
+                send_message(bot_key, chat_id, "⚠️ No pude determinar el bot del ticket (BotKey inválido).")
+                return {"ok": True}
 
-        client_chat_id = int(m.group(1))
+            m = CHATID_RE.search(replied_text)
+            if not m:
+                send_message(bot_key, chat_id, "⚠️ No encontré ChatID en el ticket.")
+                return {"ok": True}
 
-        # extraer respuesta
-        reply_text = re.sub(r"^/r(@\w+)?\s*", "", text).strip()
-        if not reply_text:
-            send_message(bot_key, chat_id, "⚠️ Escribe algo después de /r. Ej: /r Ya te ayudamos.")
+            client_chat_id = int(m.group(1))
+
+            # extraer respuesta (quita "/r" o "/r@bot")
+            reply_text = re.sub(r"^/r(@\w+)?\s*", "", text).strip()
+            if not reply_text:
+                send_message(bot_key, chat_id, "⚠️ Escribe algo después de /r. Ej: /r Ya te ayudamos con el biométrico.")
+                return {"ok": True}
+
+            # RESPONDER al cliente usando el bot correcto del ticket
+            send_message(ticket_bot_key, client_chat_id, f"🤓 Soporte: {reply_text}")
+            send_message(bot_key, chat_id, f"✅ Respuesta enviada al cliente usando {ticket_bot_key}.")
             return {"ok": True}
-
-        # ✅ Como ticket_bot_key == bot_key, respondemos con ESTE bot
-        send_message(bot_key, client_chat_id, f"🤓 Soporte: {reply_text}")
-        send_message(bot_key, chat_id, f"✅ Respuesta enviada al cliente usando {bot_key}.")
-        return {"ok": True}
 
     return {"ok": True}
