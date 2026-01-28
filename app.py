@@ -2,6 +2,9 @@ import re
 import os
 import requests
 from fastapi import FastAPI, Request, HTTPException
+from openpyxl import load_workbook
+
+
 
 # =========================================================
 # CONFIG
@@ -21,6 +24,12 @@ BOTS = {
         "default_error_code": "601",
         "default_error_text": "Error 601, la página necesita biométrico",
     },
+    "bot_c": {
+        "token_env": "BOT_TOKEN_C",
+        "display": "fprueba",
+        "default_error_code": "601",
+        "default_error_text": "Error 601, la página necesita biométrico",
+    },
 }
 
 # =========================================================
@@ -30,6 +39,10 @@ app = FastAPI()
 
 CHATID_RE = re.compile(r"ChatID:\s*(-?\d+)")
 TICKET_TAG = "🧾 TICKET"
+ERROR_CATALOG_PATH = os.getenv("ERROR_CATALOG_PATH", "catalogo_errores.xlsx")
+ERROR_MAP = {}  # cache: "604" -> {"plataforma":..., "causa":..., "solucion":...}
+SUPPORT_ROUTER_BOT_KEY = os.getenv("SUPPORT_ROUTER_BOT_KEY", "bot_a").strip()
+TICKET_API_KEY = os.getenv("TICKET_API_KEY", "").strip()
 
 # =========================================================
 # Helpers Telegram
@@ -87,9 +100,109 @@ def parse_ticket_botkey(text: str) -> str | None:
 # =========================================================
 # Health
 # =========================================================
+
+
+def require_api_key(req: Request):
+    if not TICKET_API_KEY:
+        return  # si no seteas API key, queda abierto (no recomendado)
+    key = req.headers.get("x-api-key", "").strip()
+    if key != TICKET_API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+
+@app.post("/ticket")
+async def create_ticket(req: Request):
+    require_api_key(req)
+
+    payload = await req.json()
+
+    # esperado:
+    # {
+    #   "bot_key": "bot_c",
+    #   "error_code": "604",
+    #   "user": {"id":123, "first_name":"", "last_name":"", "username":""}
+    # }
+
+    bot_key = (payload.get("bot_key") or "").strip()
+    error_code = str(payload.get("error_code") or "").strip()
+    user = payload.get("user") or {}
+
+    if bot_key not in BOTS:
+        raise HTTPException(status_code=400, detail="bot_key no registrado en BOTS")
+    if not error_code:
+        raise HTTPException(status_code=400, detail="error_code requerido")
+    if not user.get("id"):
+        raise HTTPException(status_code=400, detail="user.id (chatid) requerido")
+
+    client_chat_id = int(user["id"])
+    first = (user.get("first_name") or "").strip()
+    last = (user.get("last_name") or "").strip()
+    username = (user.get("username") or "").strip()
+    uname = f"@{username}" if username else "(sin username)"
+    full_name = (first + " " + last).strip() or "Cliente"
+
+    bot_display = BOTS[bot_key]["display"]
+
+    # ✅ catálogo excel
+    ensure_error_map_loaded()
+    info = ERROR_MAP.get(error_code, {"plataforma": "-", "causa": "-", "solucion": "-"})
+
+    ticket_text = (
+        f"{TICKET_TAG}\n"
+        f"🤖 Bot: {bot_display}\n"
+        f"BotKey: {bot_key}\n"
+        f"👤 Cliente: {full_name} {uname}\n"
+        f"ChatID: {client_chat_id}\n"
+        f"⚠️ Error: Error {error_code}\n"
+        f"📝 Plataforma: {info['plataforma']}\n"
+        f"🧩 Causa: {info['causa']}\n"
+        f"✅ Solución: {info['solucion']}\n\n"
+        f"↩️ Responde a ESTE mensaje con:\n"
+        f"/r tu respuesta aquí"
+    )
+
+    # ✅ IMPORTANTE: enviamos el ticket al grupo usando el BOT ROUTER
+    send_message(SUPPORT_ROUTER_BOT_KEY, SUPPORT_GROUP_ID, ticket_text)
+
+    return {"ok": True}
+
+
 @app.get("/")
 def health():
     return {"ok": True, "service": "telegram-support-multibot", "bots": list(BOTS.keys())}
+
+
+def load_error_catalog(path: str) -> dict:
+    wb = load_workbook(path, data_only=True)
+    ws = wb.active
+
+    out = {}
+    # headers fila 1, datos desde fila 2, A-D
+    for row in ws.iter_rows(min_row=2, max_col=4, values_only=True):
+        code, plataforma, causa, solucion = row
+        if code is None:
+            continue
+
+        code_str = str(code).strip()
+        if not code_str:
+            continue
+
+        out[code_str] = {
+            "plataforma": (str(plataforma).strip() if plataforma else "-"),
+            "causa": (str(causa).strip() if causa else "-"),
+            "solucion": (str(solucion).strip() if solucion else "-"),
+        }
+
+    return out
+
+def ensure_error_map_loaded():
+    global ERROR_MAP
+    if not ERROR_MAP:
+        try:
+            ERROR_MAP = load_error_catalog(ERROR_CATALOG_PATH)
+        except Exception:
+            ERROR_MAP = {}
+
+
 
 # =========================================================
 # Webhook por bot:
@@ -125,6 +238,9 @@ async def telegram_webhook(bot_key: str, req: Request):
             full_name = (from_user.get("first_name", "") + " " + from_user.get("last_name", "")).strip()
             username = from_user.get("username")
             uname = f"@{username}" if username else "(sin username)"
+            
+            ensure_error_map_loaded()
+            info = ERROR_MAP.get(str(error_code).strip(), {"plataforma": "-", "causa": "-", "solucion": "-"})
 
             ticket_text = (
                 f"{TICKET_TAG}\n"
@@ -133,12 +249,13 @@ async def telegram_webhook(bot_key: str, req: Request):
                 f"👤 Cliente: {full_name} {uname}\n"
                 f"ChatID: {client_chat_id}\n"
                 f"⚠️ Error: Error {error_code}\n"
-                f"📝 Detalle: -\n"
-                f"🧩 Causa: -\n"
-                f"✅ Solución: -\n\n"
+                f"📝 Plataforma: {info['plataforma']}\n"
+                f"🧩 Causa: {info['causa']}\n"
+                f"✅ Solución: {info['solucion']}\n\n"
                 f"↩️ Responde a ESTE mensaje con:\n"
                 f"/r tu respuesta aquí"
             )
+
 
             # ✅ PROBLEMA 1: quitar el botón para evitar doble ticket
             # (si falla por cualquier cosa, igual seguimos)
@@ -202,7 +319,7 @@ async def telegram_webhook(bot_key: str, req: Request):
 
             # ✅ PROBLEMA 2 y 3: si este webhook NO es del bot dueño del ticket, IGNORAR.
             # Esto evita confirmación doble y evita enviar 2 veces al cliente.
-            if bot_key != ticket_bot_key:
+            if bot_key != SUPPORT_ROUTER_BOT_KEY:
                 return {"ok": True}
 
             m = CHATID_RE.search(replied_text)
