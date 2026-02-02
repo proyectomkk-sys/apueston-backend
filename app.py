@@ -4,13 +4,12 @@ import requests
 from fastapi import FastAPI, Request, HTTPException
 from openpyxl import load_workbook
 
-
-
 # =========================================================
 # CONFIG
 # =========================================================
-SUPPORT_GROUP_ID = int(os.getenv("SUPPORT_GROUP_ID", "-1003575621343"))  # tu grupo soporte
+SUPPORT_GROUP_ID = int(os.getenv("SUPPORT_GROUP_ID", "-1003575621343"))
 
+# ✅ Claves internas ESTABLES (bot_a/bot_b/bot_c)
 BOTS = {
     "bot_a": {
         "token_env": "BOT_TOKEN_A",
@@ -24,12 +23,20 @@ BOTS = {
         "default_error_code": "601",
         "default_error_text": "Error 601, la página necesita biométrico",
     },
-    "HS Call Center": {
+    "bot_c": {
         "token_env": "BOT_TOKEN_C",
         "display": "HS Call Center",
         "default_error_code": "601",
         "default_error_text": "Error 601, la página necesita biométrico",
     },
+}
+
+# ✅ Alias/nombres que puede mandar C# -> bot_key interno
+BOT_ALIASES = {
+    "HS Call Center": "bot_c",
+    "Ayuda Cajero Referidor": "bot_a",
+    "Bot Pruebas": "bot_b",
+    # por si te llega en minúsculas o con espacios extra, igual lo cubre normalize_bot_key()
 }
 
 # =========================================================
@@ -39,10 +46,51 @@ app = FastAPI()
 
 CHATID_RE = re.compile(r"ChatID:\s*(-?\d+)")
 TICKET_TAG = "🧾 TICKET"
+
 ERROR_CATALOG_PATH = os.getenv("ERROR_CATALOG_PATH", "catalogo_errores.xlsx")
 ERROR_MAP = {}  # cache: "604" -> {"plataforma":..., "causa":..., "solucion":...}
+
 SUPPORT_ROUTER_BOT_KEY = os.getenv("SUPPORT_ROUTER_BOT_KEY", "bot_a").strip()
 TICKET_API_KEY = os.getenv("TICKET_API_KEY", "").strip()
+
+# =========================================================
+# Normalización de bot_key
+# =========================================================
+def normalize_bot_key(raw: str | None) -> str | None:
+    """
+    Acepta:
+      - bot_key interno: bot_a/bot_b/bot_c
+      - alias exacto: 'HS Call Center' -> bot_c
+      - display exacto: 'Bot Pruebas' -> bot_b
+    Devuelve bot_key interno o None.
+    """
+    if not raw:
+        return None
+
+    s = str(raw).strip()
+    if not s:
+        return None
+
+    # 1) ya es key interno
+    if s in BOTS:
+        return s
+
+    # 2) alias exacto
+    if s in BOT_ALIASES and BOT_ALIASES[s] in BOTS:
+        return BOT_ALIASES[s]
+
+    # 3) alias case-insensitive + trim
+    s_low = s.lower()
+    for k, v in BOT_ALIASES.items():
+        if k.strip().lower() == s_low and v in BOTS:
+            return v
+
+    # 4) match por display (case-insensitive)
+    for bot_key, bot in BOTS.items():
+        if (bot.get("display") or "").strip().lower() == s_low:
+            return bot_key
+
+    return None
 
 # =========================================================
 # Helpers Telegram
@@ -84,99 +132,26 @@ def answer_callback_query(bot_key: str, callback_query_id: str, text: str = "", 
     payload = {"callback_query_id": callback_query_id, "text": text, "show_alert": show_alert}
     return tg(bot_key, "answerCallbackQuery", payload)
 
-# ✅ NUEVO: quitar teclado (botón) del mensaje original
 def remove_inline_keyboard(bot_key: str, chat_id: int, message_id: int):
     payload = {
         "chat_id": chat_id,
         "message_id": message_id,
-        "reply_markup": {"inline_keyboard": []},  # vacío = desaparece
+        "reply_markup": {"inline_keyboard": []},
     }
     return tg(bot_key, "editMessageReplyMarkup", payload)
 
 def parse_ticket_botkey(text: str) -> str | None:
-    m = re.search(r"BotKey:\s*([a-zA-Z0-9_]+)", text)
-    return m.group(1) if m else None
+    m = re.search(r"BotKey:\s*([^\n\r]+)", text)  # ✅ toma toda la línea (por si trae espacios)
+    return m.group(1).strip() if m else None
 
 # =========================================================
-# Health
+# Excel catálogo
 # =========================================================
-
-
-def require_api_key(req: Request):
-    if not TICKET_API_KEY:
-        return  # si no seteas API key, queda abierto (no recomendado)
-    key = req.headers.get("x-api-key", "").strip()
-    if key != TICKET_API_KEY:
-        raise HTTPException(status_code=401, detail="Invalid API key")
-
-@app.post("/ticket")
-async def create_ticket(req: Request):
-    require_api_key(req)
-
-    payload = await req.json()
-
-    # esperado:
-    # {
-    #   "bot_key": "bot_c",
-    #   "error_code": "604",
-    #   "user": {"id":123, "first_name":"", "last_name":"", "username":""}
-    # }
-
-    bot_key = (payload.get("bot_key") or "").strip()
-    error_code = str(payload.get("error_code") or "").strip()
-    user = payload.get("user") or {}
-
-    if bot_key not in BOTS:
-        raise HTTPException(status_code=400, detail="bot_key no registrado en BOTS")
-    if not error_code:
-        raise HTTPException(status_code=400, detail="error_code requerido")
-    if not user.get("id"):
-        raise HTTPException(status_code=400, detail="user.id (chatid) requerido")
-
-    client_chat_id = int(user["id"])
-    first = (user.get("first_name") or "").strip()
-    last = (user.get("last_name") or "").strip()
-    username = (user.get("username") or "").strip()
-    uname = f"@{username}" if username else "(sin username)"
-    full_name = (first + " " + last).strip() or "Cliente"
-
-    bot_display = BOTS[bot_key]["display"]
-
-    # ✅ catálogo excel
-    ensure_error_map_loaded()
-    info = ERROR_MAP.get(error_code, {"plataforma": "-", "causa": "-", "solucion": "-"})
-
-    ticket_text = (
-        f"{TICKET_TAG}\n"
-        f"🤖 Bot: {bot_display}\n"
-        f"BotKey: {bot_key}\n"
-        f"👤 Cliente: {full_name} {uname}\n"
-        f"ChatID: {client_chat_id}\n"
-        f"⚠️ Error: Error {error_code}\n"
-        f"📝 Plataforma: {info['plataforma']}\n"
-        f"🧩 Causa: {info['causa']}\n"
-        f"✅ Solución: {info['solucion']}\n\n"
-        f"↩️ Responde a ESTE mensaje con:\n"
-        f"/r tu respuesta aquí"
-    )
-
-    # ✅ IMPORTANTE: enviamos el ticket al grupo usando el BOT ROUTER
-    send_message(SUPPORT_ROUTER_BOT_KEY, SUPPORT_GROUP_ID, ticket_text)
-
-    return {"ok": True}
-
-
-@app.get("/")
-def health():
-    return {"ok": True, "service": "telegram-support-multibot", "bots": list(BOTS.keys())}
-
-
 def load_error_catalog(path: str) -> dict:
     wb = load_workbook(path, data_only=True)
     ws = wb.active
 
     out = {}
-    # headers fila 1, datos desde fila 2, A-D
     for row in ws.iter_rows(min_row=2, max_col=4, values_only=True):
         code, plataforma, causa, solucion = row
         if code is None:
@@ -191,7 +166,6 @@ def load_error_catalog(path: str) -> dict:
             "causa": (str(causa).strip() if causa else "-"),
             "solucion": (str(solucion).strip() if solucion else "-"),
         }
-
     return out
 
 def ensure_error_map_loaded():
@@ -202,12 +176,78 @@ def ensure_error_map_loaded():
         except Exception:
             ERROR_MAP = {}
 
-
+# =========================================================
+# Auth para /ticket
+# =========================================================
+def require_api_key(req: Request):
+    if not TICKET_API_KEY:
+        return
+    key = req.headers.get("x-api-key", "").strip()
+    if key != TICKET_API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid API key")
 
 # =========================================================
-# Webhook por bot:
-#   /telegram/bot_a
-#   /telegram/bot_b
+# Health
+# =========================================================
+@app.get("/")
+def health():
+    return {"ok": True, "service": "telegram-support-multibot", "bots": list(BOTS.keys())}
+
+# =========================================================
+# POST /ticket (desde C#)
+# =========================================================
+@app.post("/ticket")
+async def create_ticket(req: Request):
+    require_api_key(req)
+    payload = await req.json()
+
+    raw_bot = (payload.get("bot_key") or "").strip()
+    bot_key = normalize_bot_key(raw_bot)
+
+    error_code = str(payload.get("error_code") or "").strip()
+    user = payload.get("user") or {}
+
+    if not bot_key:
+        raise HTTPException(status_code=400, detail=f"bot_key/botname no reconocido: {raw_bot}")
+    if not error_code:
+        raise HTTPException(status_code=400, detail="error_code requerido")
+    if not user.get("id"):
+        raise HTTPException(status_code=400, detail="user.id (chatid) requerido")
+
+    client_chat_id = int(user["id"])
+    first = (user.get("first_name") or "").strip()
+    last = (user.get("last_name") or "").strip()
+    username = (user.get("username") or "").strip()
+    uname = f"@{username}" if username else "(sin username)"
+    full_name = (first + " " + last).strip() or "Cliente"
+
+    bot_display = BOTS[bot_key]["display"]
+
+    ensure_error_map_loaded()
+    info = ERROR_MAP.get(error_code, {"plataforma": "-", "causa": "-", "solucion": "-"})
+
+    # ✅ Guardamos BotKey interno SIEMPRE (para que /r funcione)
+    ticket_text = (
+        f"{TICKET_TAG}\n"
+        f"🤖 Bot: {bot_display}\n"
+        f"BotKey: {bot_key}\n"
+        f"BotName: {raw_bot}\n"
+        f"👤 Cliente: {full_name} {uname}\n"
+        f"ChatID: {client_chat_id}\n"
+        f"⚠️ Error: Error {error_code}\n"
+        f"📝 Plataforma: {info['plataforma']}\n"
+        f"🧩 Causa: {info['causa']}\n"
+        f"✅ Solución: {info['solucion']}\n\n"
+        f"↩️ Responde a ESTE mensaje con:\n"
+        f"/r tu respuesta aquí"
+    )
+
+    # Ticket al grupo usando el router
+    send_message(SUPPORT_ROUTER_BOT_KEY, SUPPORT_GROUP_ID, ticket_text)
+    return {"ok": True}
+
+# =========================================================
+# Webhook por bot: /telegram/bot_a, /telegram/bot_b, /telegram/bot_c
 # =========================================================
 @app.post("/telegram/{bot_key}")
 async def telegram_webhook(bot_key: str, req: Request):
@@ -217,9 +257,7 @@ async def telegram_webhook(bot_key: str, req: Request):
     update = await req.json()
     bot_display = BOTS[bot_key]["display"]
 
-    # ----------------------------
     # 1) CallbackQuery: botón REPORTAR
-    # ----------------------------
     if "callback_query" in update:
         cq = update["callback_query"]
         data = cq.get("data", "")
@@ -233,12 +271,12 @@ async def telegram_webhook(bot_key: str, req: Request):
             chat = msg.get("chat", {})
 
             client_chat_id = chat.get("id")
-            client_message_id = msg.get("message_id")  # ✅ para editar y quitar botón
+            client_message_id = msg.get("message_id")
 
             full_name = (from_user.get("first_name", "") + " " + from_user.get("last_name", "")).strip()
             username = from_user.get("username")
             uname = f"@{username}" if username else "(sin username)"
-            
+
             ensure_error_map_loaded()
             info = ERROR_MAP.get(str(error_code).strip(), {"plataforma": "-", "causa": "-", "solucion": "-"})
 
@@ -256,28 +294,18 @@ async def telegram_webhook(bot_key: str, req: Request):
                 f"/r tu respuesta aquí"
             )
 
-
-            # ✅ PROBLEMA 1: quitar el botón para evitar doble ticket
-            # (si falla por cualquier cosa, igual seguimos)
             try:
                 remove_inline_keyboard(bot_key, client_chat_id, client_message_id)
             except Exception:
                 pass
 
-            # enviamos al grupo soporte
             send_message(bot_key, SUPPORT_GROUP_ID, ticket_text)
-
-            # confirmación al cliente
             send_message(bot_key, client_chat_id, "✅ Tu reporte fue enviado. En breve soporte se comunicará contigo.")
-
-            # cerramos callback
             answer_callback_query(bot_key, callback_id, "Reporte enviado ✅", show_alert=False)
 
         return {"ok": True}
 
-    # ----------------------------
-    # 2) Mensajes (comandos /start /prueba /getchatid y /r en grupo)
-    # ----------------------------
+    # 2) Mensajes
     if "message" in update:
         msg = update["message"]
         chat = msg.get("chat", {})
@@ -299,8 +327,12 @@ async def telegram_webhook(bot_key: str, req: Request):
             send_message(bot_key, chat_id, f"chat_id de este chat/grupo: {chat_id}")
             return {"ok": True}
 
-        # /r (solo en el grupo soporte y como reply a ticket)
+        # /r en el grupo soporte
         if chat_id == SUPPORT_GROUP_ID and (text.startswith("/r") or text.startswith("/r@")):
+            # ✅ Solo router procesa /r
+            if bot_key != SUPPORT_ROUTER_BOT_KEY:
+                return {"ok": True}
+
             reply_to = msg.get("reply_to_message")
             if not reply_to or not (reply_to.get("text") or ""):
                 send_message(bot_key, chat_id, "⚠️ Debes responder (reply) al mensaje del ticket y escribir: /r tu respuesta")
@@ -311,15 +343,10 @@ async def telegram_webhook(bot_key: str, req: Request):
                 send_message(bot_key, chat_id, "⚠️ El mensaje respondido no parece un ticket.")
                 return {"ok": True}
 
-            # Detectar a qué bot pertenece ese ticket
-            ticket_bot_key = parse_ticket_botkey(replied_text) or bot_key
-            if ticket_bot_key not in BOTS:
-                send_message(bot_key, chat_id, "⚠️ No pude determinar el bot del ticket (BotKey inválido).")
-                return {"ok": True}
-
-            # ✅ PROBLEMA 2 y 3: si este webhook NO es del bot dueño del ticket, IGNORAR.
-            # Esto evita confirmación doble y evita enviar 2 veces al cliente.
-            if bot_key != SUPPORT_ROUTER_BOT_KEY:
+            raw_ticket_bot = parse_ticket_botkey(replied_text) or ""
+            ticket_bot_key = normalize_bot_key(raw_ticket_bot)
+            if not ticket_bot_key:
+                send_message(bot_key, chat_id, f"⚠️ No pude determinar el bot del ticket. BotKey/BotName leído: {raw_ticket_bot}")
                 return {"ok": True}
 
             m = CHATID_RE.search(replied_text)
@@ -334,12 +361,13 @@ async def telegram_webhook(bot_key: str, req: Request):
                 send_message(bot_key, chat_id, "⚠️ Escribe algo después de /r. Ej: /r Ya te ayudamos con el biométrico.")
                 return {"ok": True}
 
-            # RESPONDER al cliente usando el bot correcto del ticket
-            send_message(ticket_bot_key, client_chat_id, f"🤓 Soporte: {reply_text}")
-            send_message(bot_key, chat_id, f"✅ Respuesta enviada al cliente usando {ticket_bot_key}.")
+            # Enviar al cliente con el bot correcto
+            try:
+                send_message(ticket_bot_key, client_chat_id, f"🤓 Soporte: {reply_text}")
+                send_message(bot_key, chat_id, f"✅ Respuesta enviada al cliente usando {ticket_bot_key}.")
+            except Exception as e:
+                send_message(bot_key, chat_id, f"❌ No pude enviar al cliente con {ticket_bot_key}: {e}")
+
             return {"ok": True}
 
     return {"ok": True}
-
-
-
