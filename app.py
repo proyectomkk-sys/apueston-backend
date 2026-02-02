@@ -26,7 +26,7 @@ BOTS = {
     },
     "bot_c": {
         "token_env": "BOT_TOKEN_C",
-        "display": "fprueba",
+        "display": "HS Call Center",
         "default_error_code": "601",
         "default_error_text": "Error 601, la página necesita biométrico",
     },
@@ -340,3 +340,4 @@ async def telegram_webhook(bot_key: str, req: Request):
             return {"ok": True}
 
     return {"ok": True}
+
