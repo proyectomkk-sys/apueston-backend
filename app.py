@@ -24,7 +24,7 @@ BOTS = {
         "default_error_code": "601",
         "default_error_text": "Error 601, la página necesita biométrico",
     },
-    "HS Call Center": {
+    "bot_c": {
         "token_env": "BOT_TOKEN_C",
         "display": "HS Call Center",
         "default_error_code": "601",
