@@ -29,6 +29,85 @@ BOTS = {
         "default_error_code": "601",
         "default_error_text": "Error 601, la página necesita biométrico",
     },
+    "bot_d": {
+        "token_env": "BOT_TOKEN_D",
+        "display": "TMT",
+        "default_error_code": "601",
+        "default_error_text": "Error 601, la página necesita biométrico",
+    },
+    "bot_e": {
+        "token_env": "David 24/7",
+        "display": "HS Call Center",
+        "default_error_code": "601",
+        "default_error_text": "Error 601, la página necesita biométrico",
+    },
+    "bot_f": {
+        "token_env": "BOT_TOKEN_F",
+        "display": "La_Tinca",
+        "default_error_code": "601",
+        "default_error_text": "Error 601, la página necesita biométrico",
+    },
+    "bot_g": {
+        "token_env": "BOT_TOKEN_G",
+        "display": "Melfast",
+        "default_error_code": "601",
+        "default_error_text": "Error 601, la página necesita biométrico",
+    },
+    "bot_h": {
+        "token_env": "BOT_TOKEN_H",
+        "display": "Bot Express",
+        "default_error_code": "601",
+        "default_error_text": "Error 601, la página necesita biométrico",
+    },
+    "bot_i": {
+        "token_env": "BOT_TOKEN_I",
+        "display": "Jhona 24/7",
+        "default_error_code": "601",
+        "default_error_text": "Error 601, la página necesita biométrico",
+    },
+    "bot_j": {
+        "token_env": "BOT_TOKEN_J",
+        "display": "Team FK",
+        "default_error_code": "601",
+        "default_error_text": "Error 601, la página necesita biométrico",
+    },
+    "bot_k": {
+        "token_env": "BOT_TOKEN_K",
+        "display": "Nattifast",
+        "default_error_code": "601",
+        "default_error_text": "Error 601, la página necesita biométrico",
+    },
+    "bot_l": {
+        "token_env": "BOT_TOKEN_L",
+        "display": "Bet Hacks",
+        "default_error_code": "601",
+        "default_error_text": "Error 601, la página necesita biométrico",
+    },
+    "bot_m": {
+        "token_env": "BOT_TOKEN_M",
+        "display": "Alycor",
+        "default_error_code": "601",
+        "default_error_text": "Error 601, la página necesita biométrico",
+    },
+    "bot_n": {
+        "token_env": "BOT_TOKEN_N",
+        "display": "BetCajeros",
+        "default_error_code": "601",
+        "default_error_text": "Error 601, la página necesita biométrico",
+    },
+    "bot_o": {
+        "token_env": "BOT_TOKEN_O",
+        "display": "LA SORTE TEAM",
+        "default_error_code": "601",
+        "default_error_text": "Error 601, la página necesita biométrico",
+    },
+    "bot_p": {
+        "token_env": "BOT_TOKEN_P",
+        "display": "EmiFast",
+        "default_error_code": "601",
+        "default_error_text": "Error 601, la página necesita biométrico",
+    },
+    
 }
 
 # ✅ Alias/nombres que puede mandar C# -> bot_key interno
