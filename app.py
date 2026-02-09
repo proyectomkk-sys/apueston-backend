@@ -302,6 +302,21 @@ async def create_ticket(req: Request):
 
     bot_display = BOTS[bot_key]["display"]
 
+    
+    # =========================================================
+    # 🔴 TICKET CHAT (formato fijo, sin catálogo)
+    # =========================================================
+    if error_code.upper() == "CHAT":
+        ticket_text = (
+            "🔴TICKET CHAT\n"
+            f"👤Cliente: {full_name} {uname}\n"
+            "⚠️ El cliente desea comunicarse directamente con alguien de soporte."
+            )
+
+        # enviar al grupo usando el router
+        send_message(SUPPORT_ROUTER_BOT_KEY, SUPPORT_GROUP_ID, ticket_text)
+        return {"ok": True}
+
     ensure_error_map_loaded()
     info = ERROR_MAP.get(error_code, {"plataforma": "-", "causa": "-", "solucion": "-"})
 
@@ -355,21 +370,6 @@ async def telegram_webhook(bot_key: str, req: Request):
             full_name = (from_user.get("first_name", "") + " " + from_user.get("last_name", "")).strip()
             username = from_user.get("username")
             uname = f"@{username}" if username else "(sin username)"
-
-                # =========================================================
-                # 🔴 TICKET CHAT (formato fijo, sin catálogo)
-                # =========================================================
-            if error_code.upper() == "CHAT":
-                    ticket_text = (
-                        "🔴TICKET CHAT\n"
-                        f"👤Cliente: {full_name} {uname}\n"
-                        "⚠️ El cliente desea comunicarse directamente con alguien de soporte."
-                    )
-
-                    # enviar al grupo usando el router
-                    send_message(SUPPORT_ROUTER_BOT_KEY, SUPPORT_GROUP_ID, ticket_text)
-                    return {"ok": True}
-
 
             ensure_error_map_loaded()
             info = ERROR_MAP.get(str(error_code).strip(), {"plataforma": "-", "causa": "-", "solucion": "-"})
